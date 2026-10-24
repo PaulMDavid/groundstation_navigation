@@ -28,6 +28,7 @@ services:
   zenoh_bridge:
     image: eclipse/zenoh-bridge-ros2dds:1.8.0
     container_name: gs_zenoh_bridge
+    restart: unless-stopped
     volumes:
       - ./config/zenoh_bridge_ground.json5:/etc/zenoh/config.json5:ro
       - ./config/cyclonedds_local.xml:/etc/cyclonedds.xml:ro
