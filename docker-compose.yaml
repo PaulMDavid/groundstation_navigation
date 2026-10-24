@@ -8,7 +8,8 @@ services:
     container_name: gs_bringup_gui
     volumes:
       - ./bringup_gui:/gs/bringup_gui:ro
-      - ./config/cyclonedds.xml:/etc/cyclonedds.xml:ro
+      # cyclonedds.xml: DDS over the wired link; cyclonedds_local.xml with GS_LINK=zenoh
+      - ./config/${GS_DDS_CONFIG:-cyclonedds.xml}:/etc/cyclonedds.xml:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     environment:
       - ROS_DOMAIN_ID=0
@@ -21,3 +22,19 @@ services:
     network_mode: host
     ipc: host
     command: python3 /gs/bringup_gui/bringup_gui.py
+
+  # GS_LINK=zenoh: client end of the robot's Zenoh router (app_zenoh_bridge in
+  # navigation_ws), same version on both ends
+  zenoh_bridge:
+    image: eclipse/zenoh-bridge-ros2dds:1.8.0
+    container_name: gs_zenoh_bridge
+    volumes:
+      - ./config/zenoh_bridge_ground.json5:/etc/zenoh/config.json5:ro
+      - ./config/cyclonedds_local.xml:/etc/cyclonedds.xml:ro
+    environment:
+      - ROS_DISTRO=humble  # Humble's 24-byte GIDs
+      - ROS_DOMAIN_ID=0
+      - CYCLONEDDS_URI=file:///etc/cyclonedds.xml
+    network_mode: host
+    command: ["-c", "/etc/zenoh/config.json5", "-e", "tcp/${ROBOT_IP:-192.168.1.210}:7447"]
+    profiles: [zenoh]

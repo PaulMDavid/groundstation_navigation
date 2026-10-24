@@ -1,0 +1,15 @@
+<!-- GS_LINK=zenoh: the ground station's ROS graph stays on this machine; the Zenoh
+     bridge (zenoh_bridge_ground.json5) is the only thing that talks to the robot -->
+<CycloneDDS>
+  <Domain>
+    <General>
+      <Interfaces><NetworkInterface name="lo"/></Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>60</MaxAutoParticipantIndex>
+      <Peers><Peer Address="127.0.0.1"/></Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

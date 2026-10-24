@@ -4,6 +4,11 @@
 Talks to app_bringup_manager on the robot over plain ROS 2 topics/services:
 shows every stage, its checks and containers, and has one big button that
 brings the stack up or restarts it from the first stage that isn't working.
+
+The teleop panel drives the rover through app_teleop's mux when the robot's
+command source is `ground`: /teleop/ground/cmd_vel at 10 Hz (the robot's deadman
+stops the rover when they stop arriving), /teleop/ground/set_mode, and the robot's
+own report on /teleop/state.
 """
 import json
 import sys
@@ -13,11 +18,15 @@ import time
 import rclpy
 from PyQt5 import QtCore, QtGui, QtWidgets
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from geometry_msgs.msg import Twist
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 STALE_AFTER = 3.0  # seconds without a status message before the robot counts as gone
+TELEOP_HZ = 10
+DRIVE_KEYS = {QtCore.Qt.Key_W: (1, 0), QtCore.Qt.Key_S: (-1, 0),
+              QtCore.Qt.Key_A: (0, 1), QtCore.Qt.Key_D: (0, -1)}
 
 COLORS = {
     'pending': '#6b7280', 'stopped': '#6b7280', 'blocked': '#475569',
@@ -34,6 +43,7 @@ class RosBridge(QtCore.QObject):
     status = QtCore.pyqtSignal(dict)
     logs = QtCore.pyqtSignal(dict)
     reply = QtCore.pyqtSignal(str)
+    teleop = QtCore.pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
@@ -46,6 +56,11 @@ class RosBridge(QtCore.QObject):
         self.node.create_subscription(String, '/bringup/logs',
                                       lambda m: self.logs.emit(json.loads(m.data)), 10)
         self.log_req = self.node.create_publisher(String, '/bringup/log_request', 10)
+        self.node.create_subscription(String, '/teleop/state',
+                                      lambda m: self.teleop.emit(json.loads(m.data)), 10)
+        self.cmd_pub = self.node.create_publisher(Twist, '/teleop/ground/cmd_vel',
+                                                  qos_profile_sensor_data)
+        self.mode_pub = self.node.create_publisher(String, '/teleop/ground/set_mode', 10)
         self.clients = {name: self.node.create_client(Trigger, f'/bringup/{name}')
                         for name in ('go', 'stop')}
         threading.Thread(target=rclpy.spin, args=(self.node,), daemon=True).start()
@@ -62,6 +77,15 @@ class RosBridge(QtCore.QObject):
     def request_logs(self, container):
         self.log_req.publish(String(data=container))
 
+    def drive(self, vx, wz):
+        msg = Twist()
+        msg.linear.x, msg.angular.z = vx, wz
+        self.cmd_pub.publish(msg)
+
+    def set_mode(self, mode):
+        for _ in range(3):  # a lost message must not leave the rover driving after STOP
+            self.mode_pub.publish(String(data=mode))
+
 
 def dot(color, size=14):
     pix = QtGui.QPixmap(size, size)
@@ -75,6 +99,122 @@ def dot(color, size=14):
     return QtGui.QIcon(pix)
 
 
+class TeleopPanel(QtWidgets.QGroupBox):
+    """Mode, stop, and keyboard driving through app_teleop (source `ground`)."""
+
+    def __init__(self, ros):
+        super().__init__('Teleop')
+        self.ros = ros
+        self.state = None
+        self.state_at = 0.0
+        self.held = set()
+
+        self.mode = QtWidgets.QLabel('—')
+        self.mode.setStyleSheet('font-size: 20px; font-weight: 600;')
+        self.info = QtWidgets.QLabel()
+        self.info.setWordWrap(True)
+        modes = QtWidgets.QHBoxLayout()
+        self.mode_btns = {}
+        for m in ('autonomous', 'manual'):
+            b = QtWidgets.QPushButton(m.capitalize())
+            b.setCheckable(True)
+            b.clicked.connect(lambda _, m=m: self.ros.set_mode(m))
+            modes.addWidget(b)
+            self.mode_btns[m] = b
+        self.stop_btn = QtWidgets.QPushButton('STOP  (space)')
+        self.stop_btn.setMinimumHeight(70)
+        self.stop_btn.setStyleSheet(
+            'QPushButton { background: #dc2626; color: white; font-size: 20px; font-weight: 700;'
+            ' border-radius: 12px; border: 3px solid #7f1d1d; }'
+            'QPushButton:pressed { background: #991b1b; }')
+        self.stop_btn.clicked.connect(self.stop)
+        self.speed = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.speed.setRange(10, 100)
+        self.speed.setValue(50)
+        self.speed_label = QtWidgets.QLabel()
+        self.speed.valueChanged.connect(lambda v: self.speed_label.setText(f'Speed {v}% of the robot limit'))
+        self.speed.valueChanged.emit(self.speed.value())
+        self.cmd = QtWidgets.QLabel()
+        self.cmd.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+        keys = QtWidgets.QLabel('Hold W/S to drive, A/D to turn, in Manual. Releasing the keys, '
+                                'or this window losing focus, sends zero.')
+        keys.setWordWrap(True)
+        keys.setStyleSheet('color: palette(mid);')
+
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.addWidget(self.mode)
+        lay.addWidget(self.info)
+        lay.addLayout(modes)
+        lay.addWidget(self.stop_btn)
+        lay.addSpacing(8)
+        lay.addWidget(self.speed_label)
+        lay.addWidget(self.speed)
+        lay.addWidget(self.cmd)
+        lay.addWidget(keys)
+        lay.addStretch(1)
+
+        ros.teleop.connect(self.on_state)
+        QtWidgets.QApplication.instance().installEventFilter(self)
+        timer = QtCore.QTimer(self)
+        timer.timeout.connect(self.tick)
+        timer.start(int(1000 / TELEOP_HZ))
+
+    def stop(self):
+        self.held.clear()
+        self.ros.set_mode('stop')
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        if t in (QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease) and not ev.isAutoRepeat():
+            if ev.key() == QtCore.Qt.Key_Space:
+                if t == QtCore.QEvent.KeyPress:
+                    self.stop()
+                return True
+            if ev.key() in DRIVE_KEYS:
+                (self.held.add if t == QtCore.QEvent.KeyPress else self.held.discard)(ev.key())
+                return True
+        elif t == QtCore.QEvent.ApplicationDeactivate:
+            self.held.clear()  # key releases go elsewhere now; never keep driving
+        return False
+
+    def on_state(self, state):
+        self.state, self.state_at = state, time.time()
+
+    def tick(self):
+        fresh = self.state and time.time() - self.state_at < 1.5
+        vx = wz = 0.0
+        if fresh:
+            scale = self.speed.value() / 100
+            fwd = sum(DRIVE_KEYS[k][0] for k in self.held)
+            turn = sum(DRIVE_KEYS[k][1] for k in self.held)
+            vx = fwd * scale * self.state['max_linear']
+            wz = turn * scale * self.state['max_angular']
+        self.ros.drive(vx, wz)
+        self.cmd.setText(f'sending  v {vx:+.2f} m/s  ω {wz:+.2f} rad/s')
+
+        if not fresh:
+            self.mode.setText('no teleop state')
+            self.mode.setStyleSheet('font-size: 20px; font-weight: 600; color: #ef4444;')
+            self.info.setText('app_teleop not running, or no link to the robot.')
+            for b in self.mode_btns.values():
+                b.setChecked(False)
+            return
+        s = self.state
+        self.mode.setText(s['mode'].upper())
+        self.mode.setStyleSheet('font-size: 20px; font-weight: 600; color: %s;' % {
+            'stop': '#ef4444', 'manual': '#3b82f6', 'autonomous': '#22c55e'}[s['mode']])
+        age = s['teleop_age']['ground']
+        heard = 'yes' if age is not None and age < s['teleop_timeout'] else 'no'
+        lines = [f'Source: {s["source"]}   ·   robot hears this PC: {heard}',
+                 f'Set by: {s["mode_by"]}   ·   output v {s["out"]["vx"]:+.2f} ω {s["out"]["wz"]:+.2f}']
+        if s['source'] != 'ground':
+            lines.append(f'The robot takes commands from "{s["source"]}": only STOP works from here.')
+        self.info.setText('\n'.join(lines))
+        for m, b in self.mode_btns.items():
+            b.setChecked(s['mode'] == m)
+            b.setEnabled(s['source'] == 'ground')
+
+
 class MainWindow(QtWidgets.QWidget):
     def __init__(self, ros):
         super().__init__()
@@ -83,7 +223,7 @@ class MainWindow(QtWidgets.QWidget):
         self.last_status = 0.0
         self.selected = None
         self.setWindowTitle('Nav2 bringup')
-        self.resize(1200, 780)
+        self.resize(1400, 780)
 
         # header: connection + overall state + buttons
         self.conn = QtWidgets.QLabel()
@@ -150,7 +290,8 @@ class MainWindow(QtWidgets.QWidget):
         split = QtWidgets.QSplitter()
         split.addWidget(self.stage_list)
         split.addWidget(detail_w)
-        split.setSizes([380, 820])
+        split.addWidget(TeleopPanel(ros))
+        split.setSizes([340, 600, 300])
 
         self.events = self.mono()
         self.events.setMaximumHeight(150)
