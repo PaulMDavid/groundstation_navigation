@@ -1,0 +1,17 @@
+<CycloneDDS>
+  <Domain>
+    <General>
+      <AllowMulticast>spdp</AllowMulticast>
+      <!-- the laptop's wired interface; set GS_IFACE in .env if yours differs -->
+      <NetworkInterfaceAddress>${GS_IFACE:-enp63s0}</NetworkInterfaceAddress>
+    </General>
+    <Discovery>
+      <Peers>
+        <Peer Address="192.168.1.210"/>
+        <Peer Address="192.168.1.230"/>
+        <Peer Address="192.168.1.100"/>
+        <Peer Address="192.168.1.105"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>
