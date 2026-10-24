@@ -1,0 +1,45 @@
+{
+  // Ground-station side of the Zenoh link to the robot's router (app_zenoh_bridge).
+  // The robot's address is given on the command line (-e tcp/<ROBOT_IP>:7447), since
+  // its eduroam address changes. DDS domain: $ROS_DOMAIN_ID.
+  mode: "client",
+
+  // keep trying until the robot's router is there, and after it goes away: by default
+  // a client exits if it can't connect at startup
+  connect: {
+    timeout_ms: -1,
+    exit_on_failure: false,
+    retry: { period_init_ms: 1000, period_max_ms: 4000, period_increase_factor: 2 },
+  },
+
+  // The ground station's ROS graph stays on this machine (cyclonedds_local.xml);
+  // only what is listed here crosses to the robot, mirroring zenoh_bridge_robot.json5.
+  plugins: {
+    ros2dds: {
+      allow: {
+        publishers: [
+          "^/initialpose$",
+          "^/goal_pose$",
+          "^/teleop/ground/cmd_vel$",
+          "^/teleop/ground/set_mode$",
+          "^/bringup/log_request$",
+        ],
+        subscribers: [
+          "^/map$", "^/tf$", "^/tf_static$", "^/odom$", "^/amcl_pose$", "^/particle_cloud$",
+          "^/plan$", "^/local_plan$", "^/local_costmap/costmap$", "^/global_costmap/costmap$",
+          "^/robot_description$", "^/cmd_vel$",
+          "^/teleop/state$",
+          "^/bringup/status$", "^/bringup/logs$",
+        ],
+        service_clients: [
+          "^/bringup/go$",
+          "^/bringup/stop$",
+        ],
+        action_clients: [
+          "^/navigate_to_pose$",
+          "^/navigate_through_poses$",
+        ],
+      },
+    },
+  },
+}
